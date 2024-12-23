@@ -2,87 +2,101 @@
 using System;
 using System.Diagnostics;
 using System.Management;
+using System.Threading;
 using System.Windows.Forms;
 
 static class Program
 {
+    //mutex to ensure one instance cos I kept opening lots lol
+    private static readonly string MutexName = "Global\\PSVR2-SteamVR-AutoLaunchMutex";
+
     [STAThread]
     static void Main()
     {
-        Application.EnableVisualStyles();
-        Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new PSVR2TrayLauncher());
+        using (Mutex mutex = new Mutex(true, MutexName, out bool isNewInstance))
+        {
+            if (!isNewInstance)
+            {
+                MessageBox.Show("PSVR2-SteamVR-AutoLaunch is already running,\nIm only needed once!", "Allready Running", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                Application.Exit();
+                return;
+            }
+            else
+            {
+                Application.Run(new PSVR2SteamVRAutoLaunch());
+            }
+        }
     }
 }
 
-public class PSVR2TrayLauncher : ApplicationContext
+public class PSVR2SteamVRAutoLaunch : ApplicationContext
 {
     private NotifyIcon trayIcon;
     private ManagementEventWatcher insertWatcher;
-    private ManagementEventWatcher removeWatcher;
 
-    public PSVR2TrayLauncher()
+    public PSVR2SteamVRAutoLaunch()
     {
-        trayIcon = new NotifyIcon()
+        //yippe yippee its starting
+        trayIcon = new NotifyIcon
         {
             Icon = Resources.AppIcon,
-            ContextMenu = new ContextMenu(new MenuItem[] {
-                new MenuItem("Launch SteamVR Manualy", LaunchSteamVR),
+            ContextMenu = new ContextMenu(new MenuItem[]
+            {
+                new MenuItem("Launch SteamVR Manually", LaunchSteamVR),
                 new MenuItem("Exit", Exit)
             }),
             Visible = true
         };
-        StartWatchers();
+
+        StartWatcher();
     }
 
-    private void StartWatchers()
+    //this is from google i duuno how works but it dose
+    private void StartWatcher()
     {
         WqlEventQuery insertQuery = new WqlEventQuery("SELECT * FROM __InstanceCreationEvent WITHIN 2 WHERE TargetInstance ISA 'Win32_USBControllerDevice'");
         insertWatcher = new ManagementEventWatcher(insertQuery);
         insertWatcher.EventArrived += new EventArrivedEventHandler(DeviceInserted);
         insertWatcher.Start();
-
-        WqlEventQuery removeQuery = new WqlEventQuery("SELECT * FROM __InstanceDeletionEvent WITHIN 2 WHERE TargetInstance ISA 'Win32_USBControllerDevice'");
-        removeWatcher = new ManagementEventWatcher(removeQuery);
-        removeWatcher.EventArrived += new EventArrivedEventHandler(DeviceRemoved);
-        removeWatcher.Start();
     }
 
     private void DeviceInserted(object sender, EventArrivedEventArgs e)
     {
-        string Name = GetDeviceName(e);
-        //MessageBox.Show($"device connected: {Name}");
-        if (Name == "PS VR2 Data 9") //this is the last device that connects with a "PS" name
+        //"last" device connected so better
+        if (GetDeviceName(e) == "PS VR2 Data 9")
         {
-            LaunchSteamVR(null,null);
+            LaunchSteamVR(null, null);
         }
     }
 
-    void LaunchSteamVR(object sender, EventArgs e)
+    //uses cmd to launch steamVR so its seprate from this app
+    private void LaunchSteamVR(object sender, EventArgs e)
     {
-        string command = "/C start steam://run/250820";
-        ProcessStartInfo processInfo = new ProcessStartInfo("cmd.exe", command)
+        try
         {
-            CreateNoWindow = true,
-            UseShellExecute = false
-        };
-        Process.Start(processInfo);
+            string command = "/C start steam://run/250820";
+            ProcessStartInfo processInfo = new ProcessStartInfo("cmd.exe", command)
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false
+            };
+            Process.Start(processInfo);
+        }
+        catch (Exception ex)
+        {
+            //shouldnt happen cos steam will ask you to install it but good to have
+            MessageBox.Show($"Failed to launch SteamVR: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
-    private void DeviceRemoved(object sender, EventArrivedEventArgs e)
-    {
-        //string Name = GetDeviceName(e);
-        //MessageBox.Show($"device removed: {deviceName}");
-
-        //may add stuff here who knows
-    }
-
+    //I dunno how this works i got it from google lol
     private string GetDeviceName(EventArrivedEventArgs e)
     {
         try
         {
             ManagementBaseObject instance = (ManagementBaseObject)e.NewEvent["TargetInstance"];
             string deviceID = instance["Dependent"].ToString().Split('=')[1].Trim('"');
+
             using (ManagementObjectSearcher searcher = new ManagementObjectSearcher($"SELECT * FROM Win32_PnPEntity WHERE DeviceID = '{deviceID}'"))
             {
                 foreach (ManagementObject obj in searcher.Get())
@@ -93,24 +107,21 @@ public class PSVR2TrayLauncher : ApplicationContext
         }
         catch (Exception)
         {
-            return "Error retrieving device name";
+            return "Error getting device name";
         }
 
         return "Unknown Device";
     }
-
-    void Exit(object sender, EventArgs e)
+    //quitting im quitting!
+    private void Exit(object sender, EventArgs e)
     {
         trayIcon.Visible = false;
+        trayIcon.Dispose();
+
         if (insertWatcher != null)
         {
             insertWatcher.Stop();
             insertWatcher.Dispose();
-        }
-        if (removeWatcher != null)
-        {
-            removeWatcher.Stop();
-            removeWatcher.Dispose();
         }
         Application.Exit();
     }
