@@ -1,4 +1,5 @@
-﻿using PSVR2_AutoLaunch.Properties;
+﻿using PSVR2_AutoLaunch;
+using PSVR2_AutoLaunch.Properties;
 using System;
 using System.Diagnostics;
 using System.Management;
@@ -33,6 +34,9 @@ public class PSVR2SteamVRAutoLaunch : ApplicationContext
 {
     private NotifyIcon trayIcon;
     private ManagementEventWatcher insertWatcher;
+    private ManagementEventWatcher removeWatcher;
+    private SenseAutoRepair senseAutoRepair;
+    private MenuItem senseAutoRepairToggle;
 
     public PSVR2SteamVRAutoLaunch()
     {
@@ -40,13 +44,29 @@ public class PSVR2SteamVRAutoLaunch : ApplicationContext
         trayIcon = new NotifyIcon
         {
             Icon = Resources.AppIcon,
-            ContextMenu = new ContextMenu(new MenuItem[]
-            {
-                new MenuItem("Launch SteamVR Manually", LaunchSteamVR),
-                new MenuItem("Exit", Exit)
-            }),
             Visible = true
         };
+
+        senseAutoRepair = new SenseAutoRepair(trayIcon);
+
+        senseAutoRepairToggle = new MenuItem("Auto-repair Sense controllers")
+        {
+            Checked = senseAutoRepair.Enabled
+        };
+        senseAutoRepairToggle.Click += (s, a) =>
+        {
+            senseAutoRepairToggle.Checked = !senseAutoRepairToggle.Checked;
+            senseAutoRepair.Enabled = senseAutoRepairToggle.Checked;
+        };
+
+        trayIcon.ContextMenu = new ContextMenu(new MenuItem[]
+        {
+            new MenuItem("Launch SteamVR Manually", LaunchSteamVR),
+            new MenuItem("-"),
+            senseAutoRepairToggle,
+            new MenuItem("-"),
+            new MenuItem("Exit", Exit)
+        });
 
         StartWatcher();
     }
@@ -58,14 +78,36 @@ public class PSVR2SteamVRAutoLaunch : ApplicationContext
         insertWatcher = new ManagementEventWatcher(insertQuery);
         insertWatcher.EventArrived += new EventArrivedEventHandler(DeviceInserted);
         insertWatcher.Start();
+
+        WqlEventQuery removeQuery = new WqlEventQuery("SELECT * FROM __InstanceDeletionEvent WITHIN 2 WHERE TargetInstance ISA 'Win32_USBControllerDevice'");
+        removeWatcher = new ManagementEventWatcher(removeQuery);
+        removeWatcher.EventArrived += new EventArrivedEventHandler(DeviceRemoved);
+        removeWatcher.Start();
     }
 
     private void DeviceInserted(object sender, EventArrivedEventArgs e)
     {
+        string deviceId = GetDeviceId(e);
+
         //"last" device connected so better
-        if (GetDeviceName(e) == "PS VR2 Data 9")
+        if (GetDeviceNameById(deviceId) == "PS VR2 Data 9")
         {
             LaunchSteamVR(null, null);
+        }
+
+        if (SenseAutoRepair.TryParseSenseSide(deviceId, out SenseSide side))
+        {
+            senseAutoRepair.OnUsbArrival(side);
+        }
+    }
+
+    private void DeviceRemoved(object sender, EventArrivedEventArgs e)
+    {
+        string deviceId = GetDeviceId(e);
+
+        if (SenseAutoRepair.TryParseSenseSide(deviceId, out SenseSide side))
+        {
+            senseAutoRepair.OnUsbDeparture(side);
         }
     }
 
@@ -89,15 +131,26 @@ public class PSVR2SteamVRAutoLaunch : ApplicationContext
         }
     }
 
-    //I dunno how this works i got it from google lol
-    private string GetDeviceName(EventArrivedEventArgs e)
+    private string GetDeviceId(EventArrivedEventArgs e)
     {
         try
         {
             ManagementBaseObject instance = (ManagementBaseObject)e.NewEvent["TargetInstance"];
-            string deviceID = instance["Dependent"].ToString().Split('=')[1].Trim('"');
+            return instance["Dependent"].ToString().Split('=')[1].Trim('"');
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 
-            using (ManagementObjectSearcher searcher = new ManagementObjectSearcher($"SELECT * FROM Win32_PnPEntity WHERE DeviceID = '{deviceID}'"))
+    //I dunno how this works i got it from google lol
+    private string GetDeviceNameById(string deviceId)
+    {
+        if (string.IsNullOrEmpty(deviceId)) return "Unknown Device";
+        try
+        {
+            using (ManagementObjectSearcher searcher = new ManagementObjectSearcher($"SELECT * FROM Win32_PnPEntity WHERE DeviceID = '{deviceId}'"))
             {
                 foreach (ManagementObject obj in searcher.Get())
                 {
@@ -115,6 +168,8 @@ public class PSVR2SteamVRAutoLaunch : ApplicationContext
     //quitting im quitting!
     private void Exit(object sender, EventArgs e)
     {
+        senseAutoRepair?.Shutdown();
+
         trayIcon.Visible = false;
         trayIcon.Dispose();
 
@@ -122,6 +177,11 @@ public class PSVR2SteamVRAutoLaunch : ApplicationContext
         {
             insertWatcher.Stop();
             insertWatcher.Dispose();
+        }
+        if (removeWatcher != null)
+        {
+            removeWatcher.Stop();
+            removeWatcher.Dispose();
         }
         Application.Exit();
     }
